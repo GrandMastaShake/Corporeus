@@ -92,6 +92,15 @@ _SQL_KEYWORDS: Set[str] = {
 }
 _SQL_METHODS = {"execute", "executemany", "executescript", "raw"}
 
+# Extended SQL sinks: SQLAlchemy text(), Django .extra()
+_SQL_METHODS_EXTENDED = {"text", "extra", "raw", "RawSQL"}
+
+# Dynamic invocation patterns (getattr/__import__ evasion)
+# These are tracked in _scan_ast to catch bypass attempts like:
+#   getattr(cursor, 'execute')(user_input)
+#   __import__('os').system(cmd)
+_DYNAMIC_INVOCATION_NAMES = {"getattr", "__import__", "importlib"}
+
 
 class _TaintTracker:
     """1-level taint tracking for indirect flow detection."""
@@ -444,6 +453,99 @@ def _scan_ast(file_path: str, tree: ast.AST, lines: list[str]) -> list[Finding]:
                     )
 
         # ═══════════════════════════════════════════════════════════════
+        # CWE-78 / CWE-94 — Dynamic invocation evasion
+        # getattr(obj, 'execute')(input) and __import__('os').system(cmd)
+        # ═══════════════════════════════════════════════════════════════
+        if isinstance(node, ast.Call):
+            func_name = _full_name(node.func)
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id in _DYNAMIC_INVOCATION_NAMES
+            ):
+                # getattr(obj, 'method_name') pattern
+                if node.func.id == "getattr" and len(node.args) >= 2:
+                    method_arg = node.args[1]
+                    method_name = (
+                        method_arg.value
+                        if isinstance(method_arg, ast.Constant)
+                        and isinstance(method_arg.value, str)
+                        else None
+                    )
+                    if method_name in (_SQL_METHODS | _OS_DANGEROUS | _EVAL_EXEC):
+                        start, end = _line_range(node)
+                        findings.append(
+                            Finding(
+                                cwe_id="CWE-78",
+                                title="Dynamic Invocation Evasion via getattr()",
+                                description=(
+                                    f"getattr() used to call '{method_name}' dynamically. "
+                                    "This bypasses static analysis of direct calls."
+                                ),
+                                severity="high",
+                                line=start,
+                                line_end=end,
+                                source=_node_source(node, lines),
+                                confidence=0.80,
+                                remediation="Avoid dynamic dispatch for security-sensitive methods.",
+                                file_path=file_path,
+                            )
+                        )
+                # __import__('os') pattern
+                if node.func.id == "__import__" and node.args:
+                    imported = (
+                        node.args[0].value
+                        if isinstance(node.args[0], ast.Constant)
+                        else None
+                    )
+                    if imported in {"os", "subprocess", "commands", "pty"}:
+                        start, end = _line_range(node)
+                        findings.append(
+                            Finding(
+                                cwe_id="CWE-78",
+                                title="Dynamic Import of OS Module via __import__()",
+                                description=(
+                                    f"__import__('{imported}') used to import OS-level module "
+                                    "dynamically. Often used to evade static analysis."
+                                ),
+                                severity="high",
+                                line=start,
+                                line_end=end,
+                                source=_node_source(node, lines),
+                                confidence=0.85,
+                                remediation="Use standard import and explicit allow-listing.",
+                                file_path=file_path,
+                            )
+                        )
+
+        # ═══════════════════════════════════════════════════════════════
+        # CWE-22 Path Traversal — pathlib.Path() with user input
+        # ═══════════════════════════════════════════════════════════════
+        if isinstance(node, ast.Call):
+            func_name = _full_name(node.func)
+            if func_name in {"Path", "pathlib.Path", "PurePath"}:
+                for arg in node.args:
+                    if _is_user_controlled(arg):
+                        start, end = _line_range(node)
+                        findings.append(
+                            Finding(
+                                cwe_id="CWE-22",
+                                title="Path Traversal via pathlib.Path()",
+                                description="User input passed to pathlib.Path() without validation.",
+                                severity="high",
+                                line=start,
+                                line_end=end,
+                                source=_node_source(node, lines),
+                                confidence=0.80,
+                                remediation=(
+                                    "Validate paths using Path.resolve() and check the result "
+                                    "starts with the expected base directory."
+                                ),
+                                file_path=file_path,
+                            )
+                        )
+                        break
+
+        # ═══════════════════════════════════════════════════════════════
         # CWE-94 Code Injection — eval/exec/compile
         # ═══════════════════════════════════════════════════════════════
         if isinstance(node, ast.Call):
@@ -707,12 +809,22 @@ def _scan_ast(file_path: str, tree: ast.AST, lines: list[str]) -> list[Finding]:
 
 
 def _is_tainted_sql(node: ast.AST) -> bool:
-    """Check if node contains tainted SQL."""
+    """Check if node contains tainted SQL.
+
+    For f-strings (``ast.JoinedStr``), we require **both** a formatted value
+    (variable interpolation) **and** a SQL keyword in the string literal
+    portions. Without the keyword check, *any* f-string passed to execute()
+    is flagged — including ``db.execute(f"hello {name}")`` — producing false
+    positives that erode trust in the scanner.
+    """
     if isinstance(node, ast.JoinedStr):
-        for v in node.values:
-            if isinstance(v, ast.FormattedValue):
-                return True
-        return False
+        has_variable = any(
+            isinstance(v, ast.FormattedValue) for v in node.values
+        )
+        if not has_variable:
+            return False
+        # Check that at least one string constant in the f-string contains SQL
+        return _contains_sql(node)
     if isinstance(node, ast.BinOp):
         return _contains_sql(node) and _has_variables(node)
     if isinstance(node, ast.Call):
@@ -740,7 +852,11 @@ def scan_source(source: str, file_path: str = "<string>") -> list[Finding]:
     """
     try:
         tree = ast.parse(source, filename=file_path)
-    except SyntaxError:
+    except (SyntaxError, RecursionError, MemoryError):
+        # RecursionError: deeply nested expressions (e.g. 1+1+...x1000) crash
+        # ast.parse() before SyntaxError is raised. Without this catch, a
+        # crafted file causes an unhandled RecursionError DoS.
+        # MemoryError: extremely large source strings.
         return []
     lines = source.splitlines(keepends=True)
     return _scan_ast(file_path, tree, lines)
