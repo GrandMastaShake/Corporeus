@@ -1,6 +1,10 @@
 # Corporeus
 
-AST-based security scanner for Python. Detects 8 CWE vulnerability classes via static analysis — no runtime execution, zero dependencies.
+**AST-based static security scanner for Python.** Detects 8 CWE vulnerability classes before deployment — no runtime execution, zero external dependencies, CI/CD ready.
+
+[![Tests](https://img.shields.io/badge/tests-54%20passing-brightgreen)](tests/)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](pyproject.toml)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 ## CWE Coverage
 
@@ -52,6 +56,17 @@ pytest tests/ -v
 
 54 tests, 0 failing.
 
+## Ecosystem
+
+| Repo | Role |
+|------|------|
+| [EmberArmor](https://github.com/GrandMastaShake/EmberArmor) | Runtime enforcement layer |
+| [EmberHoneypot](https://github.com/GrandMastaShake/EmberHoneypot) | AI deception + threat intelligence |
+| [Corporeus](https://github.com/GrandMastaShake/Corporeus) | Static AST vulnerability scanner (this repo) |
+| [EmberBench](https://github.com/GrandMastaShake/EmberBench) | Adversarial evaluation harness |
+
+---
+
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE)
