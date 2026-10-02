@@ -6,7 +6,7 @@ A small Python library that parses Python source with `ast` and reports lines th
 
 Learning prototype. Not ready for use as a security control. Last updated 2026-10-02.
 
-For real projects use [Bandit](https://github.com/PyCQA/bandit), [Ruff's `S` rules](https://docs.astral.sh/ruff/rules/) or [Semgrep](https://semgrep.dev/). They resolve import aliases and ship a command line, machine-readable output and suppression comments. Corporeus has none of those.
+For real projects use [Bandit](https://github.com/PyCQA/bandit), [Ruff's `S` rules](https://docs.astral.sh/ruff/rules/) or [Semgrep](https://semgrep.dev/). Bandit and Ruff both report `os.system` when it is reached through `from os import system` or `import os as o`, and both have a command line, JSON output and suppression comments. Corporeus has none of those.
 
 ## What works today
 
@@ -24,14 +24,16 @@ Each rule carries a CWE id as a label. The label says what the rule is looking f
 
 | Label | What the rule flags |
 |-------|---------------------|
-| CWE-89 | `.execute()`, `.executemany()`, `.executescript()` or `.raw()` given an f-string, `+`, `%` or `.format()` string that contains an SQL keyword, or a variable that was assigned an interpolated string elsewhere in the file. Also any `+` or `%` string expression containing a word such as `select` or `from`. |
-| CWE-79 | `mark_safe(html)`, `render_template_string(t)`, `render_string(t)`. `Response()` or `make_response()` given a literal HTML string. |
+| CWE-89 | `.execute()`, `.executemany()`, `.executescript()` or `.raw()` given an f-string, `+`, `%` or `.format()` string that contains an SQL keyword, or a variable that was assigned an interpolated string elsewhere in the file. Also any `+` or `%` expression that combines a variable with a string containing `select`, `from` or another keyword. Keywords match as substrings, so `selection` counts. |
+| CWE-79 | `mark_safe(html)`, `render_template_string(t)`, `render_string(t)`. `Response()` or `make_response()` given a string literal that contains `<` and `html`. |
 | CWE-22 | `open(p)`, `Path(p)` and any `.join(x)` call where the argument is a variable. |
 | CWE-78 | `os.system(cmd)`, `os.popen(cmd)`. Any method named `call`, `run`, `Popen`, `check_output` or `check_call` with `shell=True` or a variable as an argument. `getattr(os, "system")`. `__import__("os")`. |
 | CWE-94 | `eval(x)`, `exec(x)`, `compile(x, ...)`. `pickle.load`, `pickle.loads`, `marshal.load`, `marshal.loads`. `yaml.unsafe_load`, and `yaml.load` without a `Loader=` keyword naming `SafeLoader` or `FullLoader`. |
 | CWE-200 | `DEBUG = True`. A string or number of four or more characters assigned to a variable whose name contains `password`, `secret`, `token`, `api_key`, `apikey`, `private_key` or `auth`. |
 | CWE-269 | Any assignment to a variable named `allow_any`, `skip_auth`, `no_auth`, `disable_auth`, `trust_all`, `permit_all` or `open_access`. |
 | CWE-352 | `csrf_exempt` used as a decorator or called. |
+
+In the CWE-22 and CWE-78 rows, "variable" covers any name, attribute, subscript, f-string or operator expression such as `a + b`. Nothing checks where the value comes from.
 
 ## What is not implemented
 
@@ -93,7 +95,7 @@ The third line is a false positive: joining a list of names is not a path operat
 
 ## Known issues
 
-- It fails open. A file that does not parse returns an empty list, the same as a clean file, with no error. That covers any syntax error and any file that starts with a UTF-8 byte-order mark.
+- It fails open. A file that does not parse returns an empty list, the same as a clean file, with no error. That covers any syntax error and any file that starts with a UTF-8 byte-order mark. A path that does not exist and a file whose suffix is not exactly `.py` also return an empty list.
 - It is noisy. `", ".join(names)` is reported as path traversal and `runner.run(task)` as command injection. On the three other public Ember repositories ([EmberArmor](https://github.com/GrandMastaShake/EmberArmor), [EmberHoneypot](https://github.com/GrandMastaShake/EmberHoneypot), [EmberBench](https://github.com/GrandMastaShake/EmberBench)) it reported 73 findings on 2026-10-02. 56 of them came from those two rules, and on reading all 73, 1 was a real issue.
 - `MAX_TOKENS = 4096` and `AUTHOR = "Jane Doe"` are reported as hardcoded secrets. The same secret string under a neutral variable name, in a dict value or in an annotated assignment is not reported, and any value containing `test`, `example`, `sample` or `dummy` is skipped.
 - `SKIP_AUTH = False` is reported as a critical auth bypass. The value is never read.
@@ -101,8 +103,9 @@ The third line is a false positive: joining a list of names is not a path operat
 - `yaml.load(s, yaml.SafeLoader)`, with the loader passed positionally, is reported as critical.
 - Two findings with the same label on one line collapse into one.
 - `Finding.source` holds the full source line, so a flagged secret is repeated by anything that prints findings.
+- `scan_directory` follows a directory junction out of the tree it was given. There is no file-size limit: each file is read into memory whole.
 - `confidence` is a fixed number per rule, not something computed.
-- The usage examples in the docstrings of `src/corporeus/__init__.py` and `src/corporeus/scanner.py` are wrong. The first contains a syntax error and so returns no findings; the second prints `CWE-CWE-78`.
+- The usage examples in the docstrings of `src/corporeus/__init__.py` and `src/corporeus/scanner.py` are wrong. The first contains a syntax error and so returns no findings; the second prints a doubled prefix such as `CWE-CWE-78`.
 
 ## Direction
 
